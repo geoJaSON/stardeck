@@ -1,0 +1,8 @@
+﻿cargo :    Compiling stardeck v0.1.0 (C:\Users\jason\stardeck)
+At line:1 char:189
++ ... Path"; Set-Location C:\Users\jason\stardeck; cargo build 2>&1 | Out-F ...
++                                                  ~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling st...jason\stardeck):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+    Finished `dev` profile [optimized + debuginfo] target(s) in 2.59s
