@@ -12,14 +12,12 @@ pub enum ViewMode {
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(default)]
 pub struct Config {
+    pub app_version: String,
     /// Primary phosphor color (all text).
     pub text_color: [u8; 3],
     /// Accent used for borders, separators, selection.
     pub accent_color: [u8; 3],
-    /// Scanline overlay opacity, 0 (off) .. 120 (heavy).
-    pub scanline_alpha: u8,
-    /// Pixels between scanlines; larger = sparser.
-    pub scanline_gap: u32,
+    pub text_brightness: f32,
     /// Peak opacity of the radial background glow, 0 (off) .. 60 (strong).
     pub glow_alpha: u8,
     pub view_mode: ViewMode,
@@ -34,10 +32,10 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Config {
+            app_version: env!("CARGO_PKG_VERSION").to_string(),
             text_color: [51, 255, 102],
             accent_color: [40, 200, 90],
-            scanline_alpha: 18,
-            scanline_gap: 4,
+            text_brightness: 1.0,
             glow_alpha: 16,
             view_mode: ViewMode::Split,
             daily_notes: true,

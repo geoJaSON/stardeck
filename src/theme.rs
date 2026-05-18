@@ -22,7 +22,13 @@ fn bright(c: [u8; 3]) -> Color32 {
 
 /// Death Star console styling, driven by the user's configured colors.
 pub fn apply(ctx: &egui::Context, cfg: &Config) {
-    let text = Color32::from_rgb(cfg.text_color[0], cfg.text_color[1], cfg.text_color[2]);
+    let clamp = |v: f32| v.clamp(0.0, 255.0) as u8;
+    let brightness_mult = cfg.text_brightness.max(0.0);
+    let text = Color32::from_rgb(
+        clamp(cfg.text_color[0] as f32 * brightness_mult),
+        clamp(cfg.text_color[1] as f32 * brightness_mult),
+        clamp(cfg.text_color[2] as f32 * brightness_mult),
+    );
     let accent = Color32::from_rgb(
         cfg.accent_color[0],
         cfg.accent_color[1],
@@ -141,23 +147,4 @@ pub fn glow(ctx: &egui::Context, cfg: &Config) {
         mesh.indices.extend_from_slice(&[0, i + 1, i + 2]);
     }
     painter.add(Shape::mesh(mesh));
-}
-
-/// Faint CRT scanlines on a foreground layer. Skipped entirely at alpha 0.
-pub fn scanlines(ctx: &egui::Context, cfg: &Config) {
-    if cfg.scanline_alpha == 0 {
-        return;
-    }
-    let screen = ctx.screen_rect();
-    let painter = ctx.layer_painter(egui::LayerId::new(
-        egui::Order::Foreground,
-        egui::Id::new("scanlines"),
-    ));
-    let line = Color32::from_rgba_unmultiplied(0, 0, 0, cfg.scanline_alpha);
-    let gap = (cfg.scanline_gap.max(2)) as f32;
-    let mut y = screen.top();
-    while y < screen.bottom() {
-        painter.hline(screen.x_range(), y, Stroke::new(1.0, line));
-        y += gap;
-    }
 }

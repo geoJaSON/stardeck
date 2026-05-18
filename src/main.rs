@@ -69,7 +69,7 @@ fn main() -> eframe::Result<()> {
             .with_min_inner_size([720.0, 480.0])
             .with_icon(app_icon())
             .with_transparent(false)
-            .with_title("STARDECK"),
+            .with_title(format!("STARDECK v{}", env!("CARGO_PKG_VERSION"))),
         ..Default::default()
     };
     eframe::run_native(
@@ -85,6 +85,7 @@ enum MdCmd {
     Italic,
     Code,
     Link,
+    Strike,
 }
 
 /// Wrap the selected character range (or insert a placeholder) with markers.
@@ -135,6 +136,8 @@ struct StarDeck {
     capture_open: bool,
     capture_text: String,
     capture_focus: bool,
+    history: Vec<String>,
+    history_idx: usize,
 }
 
 impl StarDeck {
@@ -170,9 +173,11 @@ impl StarDeck {
             capture_open: false,
             capture_text: String::new(),
             capture_focus: false,
+            history: Vec::new(),
+            history_idx: 0,
         };
         if let Some(first) = app.notes.first().cloned() {
-            app.load(&first);
+            app.nav_to(&first);
         }
         app
     }
@@ -188,6 +193,40 @@ impl StarDeck {
         self.folder = note.folder.clone();
         self.tags = note.tags.clone();
         self.dirty = false;
+    }
+
+    fn nav_to(&mut self, note: &Note) {
+        if self.history.is_empty() || self.history.get(self.history_idx) != Some(&note.id) {
+            let truncate_at = if self.history.is_empty() { 0 } else { self.history_idx + 1 };
+            self.history.truncate(truncate_at);
+            self.history.push(note.id.clone());
+            self.history_idx = self.history.len() - 1;
+        }
+        self.load(note);
+    }
+
+    fn nav_back(&mut self) {
+        if self.history_idx > 0 {
+            self.history_idx -= 1;
+            let note_id = self.history[self.history_idx].clone();
+            if let Ok(notes) = self.db.list("") {
+                if let Some(note) = notes.iter().find(|n| n.id == note_id) {
+                    self.load(note);
+                }
+            }
+        }
+    }
+
+    fn nav_forward(&mut self) {
+        if self.history_idx + 1 < self.history.len() {
+            self.history_idx += 1;
+            let note_id = self.history[self.history_idx].clone();
+            if let Ok(notes) = self.db.list("") {
+                if let Some(note) = notes.iter().find(|n| n.id == note_id) {
+                    self.load(note);
+                }
+            }
+        }
     }
 
     fn flush(&mut self) {
@@ -222,7 +261,52 @@ impl StarDeck {
             MdCmd::Italic => md_wrap(&mut self.body, sel, "*", "*", "italic"),
             MdCmd::Code => md_wrap(&mut self.body, sel, "`", "`", "code"),
             MdCmd::Link => md_wrap(&mut self.body, sel, "[", "](url)", "text"),
+            MdCmd::Strike => md_wrap(&mut self.body, sel, "~~", "~~", "strike"),
         }
+        self.touch();
+    }
+
+    fn toggle_checkbox(&mut self) {
+        let sel = self.sel.unwrap_or((self.body.chars().count(), self.body.chars().count()));
+        let chars: Vec<char> = self.body.chars().collect();
+        let cursor = sel.0.min(chars.len());
+
+        let start = chars[..cursor]
+            .iter()
+            .rposition(|&c| c == '\n')
+            .map(|p| p + 1)
+            .unwrap_or(0);
+
+        let end = chars[cursor..]
+            .iter()
+            .position(|&c| c == '\n')
+            .map(|p| cursor + p)
+            .unwrap_or(chars.len());
+
+        let line: String = chars[start..end].iter().collect();
+        let trimmed = line.trim_start();
+        let indent_len = line.len() - trimmed.len();
+        let indent = &line[..indent_len];
+
+        let new_line = if let Some(rest) = trimmed.strip_prefix("- [ ] ") {
+            format!("{indent}- [x] {rest}")
+        } else if let Some(rest) = trimmed.strip_prefix("- [x] ") {
+            format!("{indent}- [ ] {rest}")
+        } else if let Some(rest) = trimmed.strip_prefix("- [X] ") {
+            format!("{indent}- [ ] {rest}")
+        } else if let Some(rest) = trimmed.strip_prefix("- ") {
+            format!("{indent}- [ ] {rest}")
+        } else if let Some(rest) = trimmed.strip_prefix("* ") {
+            format!("{indent}- [ ] {rest}")
+        } else if let Some(rest) = trimmed.strip_prefix("+ ") {
+            format!("{indent}- [ ] {rest}")
+        } else {
+            format!("{indent}- [ ] {trimmed}")
+        };
+
+        let mut new_chars = chars.clone();
+        new_chars.splice(start..end, new_line.chars());
+        self.body = new_chars.into_iter().collect();
         self.touch();
     }
 
@@ -231,7 +315,7 @@ impl StarDeck {
         let today = chrono::Local::now().format("%Y-%m-%d").to_string();
         if let Ok(n) = self.db.daily(&today, "journal") {
             self.refresh();
-            self.load(&n);
+            self.nav_to(&n);
             self.show_settings = false;
         }
     }
@@ -266,7 +350,7 @@ impl StarDeck {
             if self.db.save(&n).is_ok() {
                 self.refresh();
                 if self.selected.as_deref() == Some(n.id.as_str()) {
-                    self.load(&n);
+                    self.nav_to(&n);
                 }
                 self.status = format!(" // captured to journal/{today}");
             }
@@ -360,7 +444,7 @@ impl StarDeck {
         };
         if ui.selectable_label(sel, format!("» {label}")).clicked() {
             self.flush();
-            self.load(n);
+            self.nav_to(n);
             self.show_settings = false;
         }
     }
@@ -381,9 +465,36 @@ impl StarDeck {
                 self.theme_dirty = true;
             }
         });
-        ui.add(egui::Slider::new(&mut self.cfg.scanline_alpha, 0..=120).text("scanline opacity"));
-        ui.add(egui::Slider::new(&mut self.cfg.scanline_gap, 2..=10).text("scanline spacing"));
+        if ui.add(egui::Slider::new(&mut self.cfg.text_brightness, 0.5..=2.0).text("text brightness")).changed() {
+            self.theme_dirty = true;
+        }
         ui.add(egui::Slider::new(&mut self.cfg.glow_alpha, 0..=60).text("background glow"));
+
+        ui.add_space(4.0);
+        ui.label("PRESETS");
+        ui.horizontal(|ui| {
+            if ui.button("[APPLE GREEN]").clicked() {
+                self.cfg.text_color = [51, 255, 102];
+                self.cfg.accent_color = [40, 200, 90];
+                self.cfg.text_brightness = 1.0;
+                self.cfg.glow_alpha = 2;
+                self.theme_dirty = true;
+            }
+            if ui.button("[DEEP BLUE]").clicked() {
+                self.cfg.text_color = [30, 100, 255];
+                self.cfg.accent_color = [10, 50, 200];
+                self.cfg.text_brightness = 1.2;
+                self.cfg.glow_alpha = 2;
+                self.theme_dirty = true;
+            }
+            if ui.button("[CRT CYAN]").clicked() {
+                self.cfg.text_color = [0, 240, 255];
+                self.cfg.accent_color = [0, 150, 200];
+                self.cfg.text_brightness = 1.0;
+                self.cfg.glow_alpha = 2;
+                self.theme_dirty = true;
+            }
+        });
 
         ui.add_space(8.0);
         ui.label("DEFAULT VIEW");
@@ -419,6 +530,7 @@ impl StarDeck {
             }
         });
         ui.add_space(6.0);
+        ui.small(format!("Version: {}", env!("CARGO_PKG_VERSION")));
         ui.small("Config: %APPDATA%\\stardeck\\config.json");
     }
 
@@ -478,7 +590,7 @@ impl StarDeck {
 
         if let Some(n) = chosen {
             self.flush();
-            self.load(&n);
+            self.nav_to(&n);
             self.show_tasks = false;
         }
     }
@@ -530,16 +642,6 @@ impl StarDeck {
                     self.cfg.save();
                 }
             }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let words = self.body.split_whitespace().count();
-                let mins = words.div_ceil(200).max(1); // ~200 wpm
-                ui.small(format!(
-                    "{} words · {} chars · ~{}m read",
-                    words,
-                    self.body.chars().count(),
-                    mins
-                ));
-            });
         });
         ui.separator();
 
@@ -652,6 +754,7 @@ impl StarDeck {
         });
 
         if editor_focused {
+            let mut toggled = false;
             let cmd = ui.input(|i| {
                 if !i.modifiers.command {
                     return None;
@@ -664,12 +767,20 @@ impl StarDeck {
                     Some(MdCmd::Code)
                 } else if i.key_pressed(egui::Key::K) {
                     Some(MdCmd::Link)
+                } else if i.key_pressed(egui::Key::D) {
+                    Some(MdCmd::Strike)
+                } else if i.key_pressed(egui::Key::T) {
+                    toggled = true;
+                    None
                 } else {
                     None
                 }
             });
             if let Some(c) = cmd {
                 self.apply_md(c);
+            }
+            if toggled {
+                self.toggle_checkbox();
             }
         }
 
@@ -685,7 +796,7 @@ impl StarDeck {
                             .clicked()
                         {
                             self.flush();
-                            self.load(&note);
+                            self.nav_to(&note);
                         }
                     }
                     None => {
@@ -697,7 +808,7 @@ impl StarDeck {
                             self.flush();
                             if let Ok(n) = self.db.daily(&target, "") {
                                 self.refresh();
-                                self.load(&n);
+                                self.nav_to(&n);
                             }
                         }
                     }
@@ -715,7 +826,7 @@ impl StarDeck {
                     .clicked()
                 {
                     self.flush();
-                    self.load(&b);
+                    self.nav_to(&b);
                 }
             }
         }
@@ -892,7 +1003,6 @@ impl eframe::App for StarDeck {
                 });
             });
             theme::glow(ctx, &self.cfg);
-            theme::scanlines(ctx, &self.cfg);
             ctx.request_repaint();
             return;
         }
@@ -916,9 +1026,25 @@ impl eframe::App for StarDeck {
             self.capture_focus = true;
         }
 
+        if ctx.input(|i| i.modifiers.alt && i.key_pressed(egui::Key::ArrowLeft)) {
+            self.nav_back();
+        }
+        if ctx.input(|i| i.modifiers.alt && i.key_pressed(egui::Key::ArrowRight)) {
+            self.nav_forward();
+        }
+
         egui::TopBottomPanel::top("hud").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.heading("STARDECK");
+                ui.separator();
+                let back_enabled = self.history_idx > 0 && !self.history.is_empty();
+                if ui.add_enabled(back_enabled, egui::Button::new("◄")).on_hover_text("Alt + Left — Back").clicked() {
+                    self.nav_back();
+                }
+                let forward_enabled = self.history_idx + 1 < self.history.len();
+                if ui.add_enabled(forward_enabled, egui::Button::new("►")).on_hover_text("Alt + Right — Forward").clicked() {
+                    self.nav_forward();
+                }
                 ui.separator();
                 ui.label(&self.status);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -951,7 +1077,7 @@ impl eframe::App for StarDeck {
                         self.flush();
                         if let Ok(n) = self.db.create() {
                             self.refresh();
-                            self.load(&n);
+                            self.nav_to(&n);
                             self.show_settings = false;
                         }
                     }
@@ -1088,7 +1214,7 @@ impl eframe::App for StarDeck {
 
             if let Some(n) = chosen {
                 self.flush();
-                self.load(&n);
+                self.nav_to(&n);
                 self.show_settings = false;
                 self.palette_open = false;
             } else if close {
@@ -1128,9 +1254,32 @@ impl eframe::App for StarDeck {
                 self.capture_open = false;
             }
         }
+        egui::TopBottomPanel::bottom("status_bar")
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    if !self.status.is_empty() {
+                        ui.small(&self.status);
+                    } else if let Some(ref _id) = self.selected {
+                        let folder_prefix = if self.folder.is_empty() { "".to_string() } else { format!("{}/", self.folder) };
+                        let title = if self.title.is_empty() { "untitled".to_string() } else { self.title.clone() };
+                        ui.small(format!("File: {}{}.md", folder_prefix, title));
+                    } else {
+                        ui.small("No file open");
+                    }
+
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if self.selected.is_some() {
+                            let words = self.body.split_whitespace().count();
+                            let chars = self.body.chars().count();
+                            let mins = words.div_ceil(200).max(1);
+                            ui.small(format!("{}W · {}C · ~{}m read", words, chars, mins));
+                        }
+                    });
+                });
+            });
 
         theme::glow(ctx, &self.cfg);
-        theme::scanlines(ctx, &self.cfg);
 
         if self.dirty {
             ctx.request_repaint_after(Duration::from_millis(750));

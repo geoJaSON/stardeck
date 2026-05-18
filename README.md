@@ -69,7 +69,7 @@ first run and moved aside as `notes.db.pre-files` (nothing is deleted).
 
 ## Status
 
-v0.1 — usable. Storage, search, and the rename-link cascade are covered by
+v1.0 — usable. Storage, search, and the rename-link cascade are covered by
 unit tests. Two-machine sync relies on your file-sync tool's conflict
 handling (concurrent offline edits to the same note resolve to a
 "conflicted copy" the indexer surfaces as a second note — see `docs/SYNC.md`).
