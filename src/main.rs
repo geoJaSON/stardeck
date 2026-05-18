@@ -68,6 +68,7 @@ fn main() -> eframe::Result<()> {
             .with_inner_size([1180.0, 760.0])
             .with_min_inner_size([720.0, 480.0])
             .with_icon(app_icon())
+            .with_transparent(false)
             .with_title("STARDECK"),
         ..Default::default()
     };
@@ -862,6 +863,13 @@ fn note_tags(n: &Note) -> Vec<String> {
 }
 
 impl eframe::App for StarDeck {
+    /// eframe's default clears the framebuffer at alpha 180. On some GPU /
+    /// compositor combinations that makes the whole window translucent
+    /// (desktop bleeding through). Clear to the opaque theme background.
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        theme::BG.to_normalized_gamma_f32()
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let boot_elapsed = self.boot.elapsed().as_secs_f32();
         if boot_elapsed < 2.0 {

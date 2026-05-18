@@ -80,7 +80,13 @@ pub fn apply(ctx: &egui::Context, cfg: &Config) {
     // to body text. A brighter phosphor makes them stand out.
     v.widgets.active.fg_stroke = Stroke::new(1.0, bright(cfg.text_color));
 
-    ctx.set_style(style);
+    // egui keeps a separate Style for dark and light themes and follows the
+    // OS theme. `ctx.set_style` only touches the *active* one, so a user whose
+    // OS is in the other mode than the dev sees egui's unstyled default
+    // (white bg, proportional font, blue selection). Pin the theme and style
+    // *both* slots so the console look is identical on every machine.
+    ctx.set_theme(egui::ThemePreference::Dark);
+    ctx.all_styles_mut(|s| *s = style.clone());
 }
 
 /// Soft radial phosphor glow, brightest at screen center and fading to nothing
