@@ -8,6 +8,7 @@ Compression=lzma2
 SolidCompression=yes
 OutputDir=Output
 OutputBaseFilename=stardeck_1.0.0_setup
+SetupIconFile=icon.ico
 PrivilegesRequired=lowest
 
 [Files]
