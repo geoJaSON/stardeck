@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo build *)",
+      "Bash(cargo check *)",
+      "Bash(cargo test *)",
+      "Bash(cd \"/c/Users/jason/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-0.29.1\" && grep -rn \"pub fn set_ccursor_range\\\\|pub fn ccursor_range\\\\|pub fn store\\\\|pub struct TextEditState\\\\|pub struct CCursorRange\\\\|impl CCursorRange\\\\|pub fn one\\\\|pub struct TextEditOutput\\\\|pub state:\\\\|pub cursor_range:\" src/widgets/text_edit/*.rs src/text_selection/*.rs 2>/dev/null | head -30)",
+      "Read(//c/Users/jason/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-0.29.1/**)",
+      "Bash(cd \"/c/Users/jason/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f\" && grep -rn \"pub fn with_icon\\\\|pub struct IconData\\\\|pub rgba\\\\|pub width\\\\|pub height\" egui-0.29.1/src/viewport.rs | head)",
+      "Read(//c/Users/jason/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/**)"
+    ]
+  }
+}

@@ -1,5 +1,6 @@
 use crate::config::Config;
-use egui::{Color32, FontFamily, FontId, Rounding, Stroke, TextStyle};
+use egui::epaint::{Mesh, Vertex, WHITE_UV};
+use egui::{Color32, FontFamily, FontId, Pos2, Rounding, Shape, Stroke, TextStyle};
 
 pub const BG: Color32 = Color32::from_rgb(2, 6, 3);
 pub const PANEL: Color32 = Color32::from_rgb(4, 12, 6);
@@ -10,6 +11,13 @@ fn dim(c: [u8; 3]) -> Color32 {
         (c[1] as f32 * 0.55) as u8,
         (c[2] as f32 * 0.55) as u8,
     )
+}
+
+/// Push a color toward white. Used for **bold** / headings, which egui can only
+/// distinguish by color (there is no bold monospace glyph set loaded).
+fn bright(c: [u8; 3]) -> Color32 {
+    let lift = |v: u8| (v as f32 + (255.0 - v as f32) * 0.55) as u8;
+    Color32::from_rgb(lift(c[0]), lift(c[1]), lift(c[2]))
 }
 
 /// Death Star console styling, driven by the user's configured colors.
@@ -25,8 +33,10 @@ pub fn apply(ctx: &egui::Context, cfg: &Config) {
     let mut style = (*ctx.style()).clone();
 
     use FontFamily::Monospace as M;
+    // Heading is the top of the range egui_commonmark interpolates h1..h6
+    // against (down to Body). A wide spread gives markdown a real hierarchy.
     style.text_styles = [
-        (TextStyle::Heading, FontId::new(24.0, M)),
+        (TextStyle::Heading, FontId::new(34.0, M)),
         (TextStyle::Body, FontId::new(16.0, M)),
         (TextStyle::Monospace, FontId::new(16.0, M)),
         (TextStyle::Button, FontId::new(15.0, M)),
@@ -41,6 +51,10 @@ pub fn apply(ctx: &egui::Context, cfg: &Config) {
     v.window_fill = BG;
     v.extreme_bg_color = Color32::BLACK;
     v.faint_bg_color = PANEL;
+    // Inline `code` background. Unset, egui falls back to a gray-64 box that
+    // clashes with the near-black phosphor theme; a faint green-black reads as
+    // a subtle inline chip instead.
+    v.code_bg_color = Color32::from_rgb(6, 26, 12);
     v.hyperlink_color = text;
     v.selection.bg_fill = accent_dim.linear_multiply(0.5);
     v.selection.stroke = Stroke::new(1.0, accent);
@@ -61,7 +75,66 @@ pub fn apply(ctx: &egui::Context, cfg: &Config) {
     v.widgets.hovered.bg_stroke = Stroke::new(1.0, accent);
     v.widgets.active.bg_stroke = Stroke::new(1.5, accent);
 
+    // strong_text_color() resolves to widgets.active.fg_stroke. The loop above
+    // set it to plain `text`, making **bold** and markdown headings identical
+    // to body text. A brighter phosphor makes them stand out.
+    v.widgets.active.fg_stroke = Stroke::new(1.0, bright(cfg.text_color));
+
     ctx.set_style(style);
+}
+
+/// Soft radial phosphor glow, brightest at screen center and fading to nothing
+/// before the edges. A faint foreground wash (like the scanlines), so it lifts
+/// the whole surface without the opaque panel fills hiding it.
+/// Skipped entirely at alpha 0.
+pub fn glow(ctx: &egui::Context, cfg: &Config) {
+    if cfg.glow_alpha == 0 {
+        return;
+    }
+    let screen = ctx.screen_rect();
+    let center = screen.center();
+    let radius = screen.width().max(screen.height()) * 0.7;
+
+    // Foreground (not Background) — a Background layer would be hidden by the
+    // opaque panel fill. Called before scanlines(), so it paints underneath it.
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::new("bg_glow"),
+    ));
+
+    let hot = Color32::from_rgba_unmultiplied(
+        cfg.accent_color[0],
+        cfg.accent_color[1],
+        cfg.accent_color[2],
+        cfg.glow_alpha,
+    );
+    let edge = Color32::from_rgba_unmultiplied(
+        cfg.accent_color[0],
+        cfg.accent_color[1],
+        cfg.accent_color[2],
+        0,
+    );
+
+    // Triangle fan: one bright center vertex ringed by transparent ones.
+    const SEGMENTS: usize = 48;
+    let mut mesh = Mesh::default();
+    mesh.vertices.push(Vertex {
+        pos: center,
+        uv: WHITE_UV,
+        color: hot,
+    });
+    for i in 0..=SEGMENTS {
+        let a = i as f32 / SEGMENTS as f32 * std::f32::consts::TAU;
+        mesh.vertices.push(Vertex {
+            pos: Pos2::new(center.x + a.cos() * radius, center.y + a.sin() * radius),
+            uv: WHITE_UV,
+            color: edge,
+        });
+    }
+    for i in 0..SEGMENTS as u32 {
+        mesh.indices.extend_from_slice(&[0, i + 1, i + 2]);
+    }
+    painter.add(Shape::mesh(mesh));
 }
 
 /// Faint CRT scanlines on a foreground layer. Skipped entirely at alpha 0.

@@ -2,7 +2,7 @@
 name = "stardeck"
 version = "0.1.0"
 edition = "2021"
-description = "Offline-first terminal-themed note taker (Postgres sync to come)"
+description = "Offline-first, terminal-themed markdown note taker — plain files, folder sync, no accounts"
 
 [dependencies]
 eframe = "0.29"

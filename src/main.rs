@@ -4,18 +4,70 @@ mod config;
 mod db;
 mod theme;
 
-use config::{BackendKind, Config, ViewMode};
+use config::{Config, ViewMode};
 use db::{Db, Note};
 use eframe::egui;
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
+/// Procedurally drawn app icon — a phosphor `>_` prompt on near-black, in the
+/// same palette as the UI. Generated in code so we pull in no image/PNG crate.
+fn app_icon() -> egui::IconData {
+    const N: i32 = 64;
+    let bg = [6u8, 18, 10, 255]; // lifted black: visible on dark taskbars
+    let border = [40u8, 200, 90, 255]; // theme accent
+    let glyph = [51u8, 255, 102, 255]; // bright phosphor
+
+    // Distance from point (px,py) to segment a->b, for fixed-width strokes.
+    let dist_seg = |px: f32, py: f32, ax: f32, ay: f32, bx: f32, by: f32| {
+        let (dx, dy) = (bx - ax, by - ay);
+        let len2 = dx * dx + dy * dy;
+        let t = if len2 == 0.0 {
+            0.0
+        } else {
+            (((px - ax) * dx + (py - ay) * dy) / len2).clamp(0.0, 1.0)
+        };
+        let (cx, cy) = (ax + t * dx, ay + t * dy);
+        ((px - cx).powi(2) + (py - cy).powi(2)).sqrt()
+    };
+
+    let mut rgba = Vec::with_capacity((N * N * 4) as usize);
+    for y in 0..N {
+        for x in 0..N {
+            let (fx, fy) = (x as f32, y as f32);
+            // Inset frame.
+            let frame = (x >= 4 && x < N - 4 && y >= 4 && y < N - 4)
+                && !(x >= 7 && x < N - 7 && y >= 7 && y < N - 7);
+            // `>` chevron.
+            let chevron = dist_seg(fx, fy, 16.0, 18.0, 30.0, 32.0) < 3.0
+                || dist_seg(fx, fy, 30.0, 32.0, 16.0, 46.0) < 3.0;
+            // `_` cursor bar.
+            let cursor = (34..=48).contains(&x) && (43..=46).contains(&y);
+
+            let px = if chevron || cursor {
+                glyph
+            } else if frame {
+                border
+            } else {
+                bg
+            };
+            rgba.extend_from_slice(&px);
+        }
+    }
+    egui::IconData {
+        rgba,
+        width: N as u32,
+        height: N as u32,
+    }
+}
+
 fn main() -> eframe::Result<()> {
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1180.0, 760.0])
             .with_min_inner_size([720.0, 480.0])
+            .with_icon(app_icon())
             .with_title("STARDECK"),
         ..Default::default()
     };
@@ -79,13 +131,16 @@ struct StarDeck {
     palette_notes: Vec<Note>,
     palette_focus: bool,
     show_tasks: bool,
+    capture_open: bool,
+    capture_text: String,
+    capture_focus: bool,
 }
 
 impl StarDeck {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let cfg = Config::load();
         theme::apply(&cc.egui_ctx, &cfg);
-        let db = Db::open().expect("open local cache");
+        let db = Db::open(&cfg.workspace_path()).expect("open workspace");
         let notes = db.list("").unwrap_or_default();
         let mut app = StarDeck {
             db,
@@ -103,7 +158,7 @@ impl StarDeck {
             last_edit: Instant::now(),
             md_cache: CommonMarkCache::default(),
             boot: Instant::now(),
-            status: " // DATA LINK: OFFLINE".to_string(),
+            status: "".to_string(),
             show_settings: false,
             theme_dirty: false,
             palette_open: false,
@@ -111,6 +166,9 @@ impl StarDeck {
             palette_notes: Vec::new(),
             palette_focus: false,
             show_tasks: false,
+            capture_open: false,
+            capture_text: String::new(),
+            capture_focus: false,
         };
         if let Some(first) = app.notes.first().cloned() {
             app.load(&first);
@@ -184,16 +242,66 @@ impl StarDeck {
         self.palette_focus = true;
     }
 
+    /// Notes that link to the current one. Scans the full index (not the
+    /// filtered view) and matches `[[title]]` case-insensitively.
+    /// Append a timestamped line to today's journal note without disturbing
+    /// whatever note is currently open. If the journal note *is* the one being
+    /// edited, the editor is refreshed so the new line shows immediately.
+    fn commit_capture(&mut self) {
+        let text = self.capture_text.trim().to_string();
+        self.capture_text.clear();
+        self.capture_open = false;
+        if text.is_empty() {
+            return;
+        }
+        self.flush(); // don't lose in-progress edits to the current note
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        if let Ok(mut n) = self.db.daily(&today, "journal") {
+            let stamp = chrono::Local::now().format("%H:%M");
+            if !n.body.is_empty() && !n.body.ends_with('\n') {
+                n.body.push('\n');
+            }
+            n.body.push_str(&format!("- {stamp} {text}\n"));
+            if self.db.save(&n).is_ok() {
+                self.refresh();
+                if self.selected.as_deref() == Some(n.id.as_str()) {
+                    self.load(&n);
+                }
+                self.status = format!(" // captured to journal/{today}");
+            }
+        }
+    }
+
     fn backlinks(&self) -> Vec<Note> {
-        if self.title.trim().is_empty() {
+        let title = self.title.trim();
+        if title.is_empty() {
             return vec![];
         }
-        let needle = format!("[[{}]]", self.title.trim());
-        self.notes
-            .iter()
-            .filter(|n| Some(&n.id) != self.selected.as_ref() && n.body.contains(&needle))
-            .cloned()
+        let needle = format!("[[{}]]", title.to_ascii_lowercase());
+        self.db
+            .list("")
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|n| {
+                Some(&n.id) != self.selected.as_ref()
+                    && n.body.to_ascii_lowercase().contains(&needle)
+            })
             .collect()
+    }
+
+    /// `[[targets]]` referenced by the current body, in first-seen order, each
+    /// paired with the note it resolves to (None = unresolved).
+    fn outgoing_links(&self) -> Vec<(String, Option<Note>)> {
+        let mut seen = std::collections::BTreeSet::new();
+        let mut out = Vec::new();
+        for target in wiki_targets(&self.body) {
+            let key = target.to_ascii_lowercase();
+            if seen.insert(key) {
+                let hit = self.db.by_title(&target);
+                out.push((target, hit));
+            }
+        }
+        out
     }
 
     fn all_tags(&self) -> Vec<String> {
@@ -274,6 +382,7 @@ impl StarDeck {
         });
         ui.add(egui::Slider::new(&mut self.cfg.scanline_alpha, 0..=120).text("scanline opacity"));
         ui.add(egui::Slider::new(&mut self.cfg.scanline_gap, 2..=10).text("scanline spacing"));
+        ui.add(egui::Slider::new(&mut self.cfg.glow_alpha, 0..=60).text("background glow"));
 
         ui.add_space(8.0);
         ui.label("DEFAULT VIEW");
@@ -288,18 +397,14 @@ impl StarDeck {
         ui.checkbox(&mut self.cfg.daily_notes, "daily notes — [TODAY] opens journal/<date>");
 
         ui.add_space(8.0);
-        ui.label("SYNC TARGET  (engine not wired yet)");
-        egui::ComboBox::from_label("backend")
-            .selected_text(format!("{:?}", self.cfg.backend))
-            .show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.cfg.backend, BackendKind::Postgres, "Postgres");
-            });
-        ui.label("connection string");
+        ui.label("WORKSPACE  (point a sync tool here to share across machines)");
+        let ws_hint = self.cfg.workspace_path().to_string_lossy().into_owned();
         ui.add(
-            egui::TextEdit::singleline(&mut self.cfg.connection_string)
+            egui::TextEdit::singleline(&mut self.cfg.workspace_dir)
                 .desired_width(f32::INFINITY)
-                .hint_text("postgres://user:pass@host:5432/stardeck"),
+                .hint_text(ws_hint),
         );
+        ui.small("Notes are .md files in this folder. Empty = default. Change takes effect on restart.");
 
         ui.add_space(12.0);
         ui.horizontal(|ui| {
@@ -426,7 +531,13 @@ impl StarDeck {
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let words = self.body.split_whitespace().count();
-                ui.small(format!("{} words · {} chars", words, self.body.chars().count()));
+                let mins = words.div_ceil(200).max(1); // ~200 wpm
+                ui.small(format!(
+                    "{} words · {} chars · ~{}m read",
+                    words,
+                    self.body.chars().count(),
+                    mins
+                ));
             });
         });
         ui.separator();
@@ -446,7 +557,19 @@ impl StarDeck {
                         let out = egui::TextEdit::multiline(&mut self.body)
                             .desired_width(f32::INFINITY)
                             .desired_rows(24)
-                            .hint_text("# markdown\n\nctrl+b bold · ctrl+i italic\nlink with [[note title]]")
+                            .hint_text(
+                                "# Heading   ## Subheading\n\
+                                 **bold**  *italic*  `code`  ~~strike~~\n\
+                                 > blockquote\n\
+                                 - bullet      1. numbered      #tag\n\
+                                 - [ ] task    - [x] done\n\
+                                 ```\ncode block\n```\n\
+                                 [label](https://url)   [[note title]] link\n\
+                                 \n\
+                                 ctrl+b bold · ctrl+i italic · ctrl+e code · ctrl+k link\n\
+                                 ctrl+p jump to note · ctrl+shift+i quick capture\n\
+                                 enter continues lists & checkboxes",
+                            )
                             .show(ui);
                         if out.response.changed() {
                             self.touch();
@@ -458,6 +581,59 @@ impl StarDeck {
                             ));
                         }
                         editor_focused = out.response.has_focus();
+
+                        // Auto-continue lists: after TextEdit inserted the
+                        // newline, repeat the bullet/checkbox (or end the list
+                        // if the item was empty), then reposition the caret.
+                        let resp_id = out.response.id;
+                        let mut state = out.state;
+                        let enter = ui
+                            .input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift);
+                        if editor_focused && enter {
+                            if let Some(cr) = out.cursor_range {
+                                let ci = cr.primary.ccursor.index;
+                                let collapsed = cr.primary.ccursor.index
+                                    == cr.secondary.ccursor.index;
+                                let chars: Vec<char> = self.body.chars().collect();
+                                if collapsed && ci >= 1 && ci <= chars.len()
+                                    && chars[ci - 1] == '\n'
+                                {
+                                    let nl = ci - 1;
+                                    let prev_start = chars[..nl]
+                                        .iter()
+                                        .rposition(|&c| c == '\n')
+                                        .map(|p| p + 1)
+                                        .unwrap_or(0);
+                                    let prev: String =
+                                        chars[prev_start..nl].iter().collect();
+                                    let mut v = chars;
+                                    let new_cur = match list_continuation(&prev) {
+                                        Some(ListEdit::Continue(s)) => {
+                                            let ins: Vec<char> = s.chars().collect();
+                                            let add = ins.len();
+                                            v.splice(ci..ci, ins);
+                                            Some(ci + add)
+                                        }
+                                        Some(ListEdit::ClearPrev) => {
+                                            let removed = nl - prev_start;
+                                            v.drain(prev_start..nl);
+                                            Some(ci - removed)
+                                        }
+                                        None => None,
+                                    };
+                                    if let Some(cur) = new_cur {
+                                        self.body = v.into_iter().collect();
+                                        state.cursor.set_char_range(Some(
+                                            egui::text::CCursorRange::one(
+                                                egui::text::CCursor::new(cur),
+                                            ),
+                                        ));
+                                        state.store(ui.ctx(), resp_id);
+                                        self.touch();
+                                    }
+                                }
+                            }
+                        }
                     });
                 });
             }
@@ -496,6 +672,38 @@ impl StarDeck {
             }
         }
 
+        let links = self.outgoing_links();
+        if !links.is_empty() {
+            ui.separator();
+            ui.label(format!("► LINKS ({})", links.len()));
+            for (target, hit) in links {
+                match hit {
+                    Some(note) => {
+                        if ui
+                            .selectable_label(false, format!("  » {}", note.title))
+                            .clicked()
+                        {
+                            self.flush();
+                            self.load(&note);
+                        }
+                    }
+                    None => {
+                        if ui
+                            .selectable_label(false, format!("  + {target}  (create)"))
+                            .on_hover_text("unresolved link — click to create the note")
+                            .clicked()
+                        {
+                            self.flush();
+                            if let Ok(n) = self.db.daily(&target, "") {
+                                self.refresh();
+                                self.load(&n);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         let back = self.backlinks();
         if !back.is_empty() {
             ui.separator();
@@ -511,6 +719,77 @@ impl StarDeck {
             }
         }
     }
+}
+
+enum ListEdit {
+    /// Prefix to insert on the new line to continue the list.
+    Continue(String),
+    /// Previous line was an empty marker — clear it to end the list.
+    ClearPrev,
+}
+
+/// Given the line the user just pressed Enter on, decide how to continue a
+/// markdown list: repeat the bullet/checkbox, increment an ordered number, or
+/// (when the item was empty) end the list. `None` = not a list line.
+fn list_continuation(prev: &str) -> Option<ListEdit> {
+    let indent_len = prev.len() - prev.trim_start().len();
+    let indent = &prev[..indent_len];
+    let rest = &prev[indent_len..];
+
+    let (marker, content) = if let Some(c) = rest
+        .strip_prefix("- [ ] ")
+        .or_else(|| rest.strip_prefix("- [x] "))
+        .or_else(|| rest.strip_prefix("- [X] "))
+    {
+        ("- [ ] ".to_string(), c)
+    } else if let Some(c) = rest
+        .strip_prefix("- ")
+        .or_else(|| rest.strip_prefix("* "))
+        .or_else(|| rest.strip_prefix("+ "))
+    {
+        (rest[..2].to_string(), c)
+    } else {
+        let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+        let after = rest.get(digits.len()..).unwrap_or("");
+        match (digits.is_empty(), after.strip_prefix(". ")) {
+            (false, Some(c)) => {
+                let n: u64 = digits.parse().unwrap_or(0);
+                (format!("{}. ", n + 1), c)
+            }
+            _ => return None,
+        }
+    };
+
+    if content.trim().is_empty() {
+        Some(ListEdit::ClearPrev)
+    } else {
+        Some(ListEdit::Continue(format!("{indent}{marker}")))
+    }
+}
+
+/// Extract `[[target]]` titles from note text. Targets are single-line and
+/// trimmed; `[[ ]]` and unterminated `[[` are ignored.
+fn wiki_targets(body: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let bytes = body.as_bytes();
+    let mut i = 0;
+    while i + 1 < bytes.len() {
+        if bytes[i] == b'[' && bytes[i + 1] == b'[' {
+            if let Some(end) = body[i + 2..].find("]]") {
+                let inner = &body[i + 2..i + 2 + end];
+                if !inner.contains('\n') {
+                    let t = inner.trim();
+                    if !t.is_empty() {
+                        out.push(t.to_string());
+                    }
+                }
+                i += 2 + end + 2;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    out
 }
 
 fn split_tags(s: &str) -> Vec<String> {
@@ -593,9 +872,9 @@ impl eframe::App for StarDeck {
                     ui.add_space(8.0);
                     let lines = [
                         "> POST ........................ OK",
-                        "> LOCAL CACHE ................. MOUNTED",
-                        "> DATA LINK ................... DEFERRED",
-                        "> NOTE INDEX .................. LOADED",
+                        "> WORKSPACE ................... MOUNTED",
+                        "> SYNC ........................ VIA FOLDER",
+                        "> NOTE INDEX .................. REBUILT",
                         "> READY",
                     ];
                     let shown = ((boot_elapsed / 2.0) * lines.len() as f32) as usize;
@@ -604,6 +883,7 @@ impl eframe::App for StarDeck {
                     }
                 });
             });
+            theme::glow(ctx, &self.cfg);
             theme::scanlines(ctx, &self.cfg);
             ctx.request_repaint();
             return;
@@ -619,6 +899,13 @@ impl eframe::App for StarDeck {
 
         if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::P)) && !self.palette_open {
             self.open_palette();
+        }
+        if ctx.input(|i| {
+            i.modifiers.command && i.modifiers.shift && i.key_pressed(egui::Key::I)
+        }) && !self.capture_open
+        {
+            self.capture_open = true;
+            self.capture_focus = true;
         }
 
         egui::TopBottomPanel::top("hud").show(ctx, |ui| {
@@ -674,6 +961,14 @@ impl eframe::App for StarDeck {
                     }
                     if self.cfg.daily_notes && ui.button("[TODAY]").clicked() {
                         self.open_daily();
+                    }
+                    if ui
+                        .button("[CAPTURE]")
+                        .on_hover_text("ctrl+shift+i — file a quick line to today's journal")
+                        .clicked()
+                    {
+                        self.capture_open = true;
+                        self.capture_focus = true;
                     }
                 });
                 ui.add_space(4.0);
@@ -793,6 +1088,40 @@ impl eframe::App for StarDeck {
             }
         }
 
+        if self.capture_open {
+            let mut commit = false;
+            let mut cancel = false;
+            egui::Window::new("» QUICK CAPTURE → today's journal  (esc to cancel)")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 90.0))
+                .default_width(520.0)
+                .show(ctx, |ui| {
+                    let resp = ui.add(
+                        egui::TextEdit::singleline(&mut self.capture_text)
+                            .desired_width(f32::INFINITY)
+                            .hint_text("jot a line — enter to file it, keeps your place"),
+                    );
+                    if self.capture_focus {
+                        resp.request_focus();
+                        self.capture_focus = false;
+                    }
+                    if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        commit = true;
+                    }
+                    if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                        cancel = true;
+                    }
+                });
+            if commit {
+                self.commit_capture();
+            } else if cancel {
+                self.capture_text.clear();
+                self.capture_open = false;
+            }
+        }
+
+        theme::glow(ctx, &self.cfg);
         theme::scanlines(ctx, &self.cfg);
 
         if self.dirty {
