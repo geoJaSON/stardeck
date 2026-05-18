@@ -124,7 +124,6 @@ struct StarDeck {
     dirty: bool,
     last_edit: Instant,
     md_cache: CommonMarkCache,
-    boot: Instant,
     status: String,
     show_settings: bool,
     theme_dirty: bool,
@@ -161,7 +160,6 @@ impl StarDeck {
             dirty: false,
             last_edit: Instant::now(),
             md_cache: CommonMarkCache::default(),
-            boot: Instant::now(),
             status: "".to_string(),
             show_settings: false,
             theme_dirty: false,
@@ -982,31 +980,6 @@ impl eframe::App for StarDeck {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        let boot_elapsed = self.boot.elapsed().as_secs_f32();
-        if boot_elapsed < 2.0 {
-            egui::CentralPanel::default().show(ctx, |ui| {
-                ui.vertical_centered(|ui| {
-                    ui.add_space(ui.available_height() * 0.32);
-                    ui.heading("S T A R D E C K");
-                    ui.add_space(8.0);
-                    let lines = [
-                        "> POST ........................ OK",
-                        "> WORKSPACE ................... MOUNTED",
-                        "> SYNC ........................ VIA FOLDER",
-                        "> NOTE INDEX .................. REBUILT",
-                        "> READY",
-                    ];
-                    let shown = ((boot_elapsed / 2.0) * lines.len() as f32) as usize;
-                    for l in lines.iter().take(shown.max(1)) {
-                        ui.monospace(*l);
-                    }
-                });
-            });
-            theme::glow(ctx, &self.cfg);
-            ctx.request_repaint();
-            return;
-        }
-
         if self.theme_dirty {
             theme::apply(ctx, &self.cfg);
             self.theme_dirty = false;
