@@ -409,38 +409,58 @@ impl StarDeck {
             .cloned()
             .collect();
 
-        let mut groups: BTreeMap<String, Vec<Note>> = BTreeMap::new();
+        let mut root = FolderNode::default();
         for n in notes {
-            groups.entry(n.folder.clone()).or_default().push(n);
+            let folder = n.folder.clone();
+            let segs: Vec<&str> = folder.split('/').filter(|s| !s.is_empty()).collect();
+            root.insert(&segs, n);
         }
 
         egui::ScrollArea::vertical().show(ui, |ui| {
-            if let Some(root) = groups.get("") {
-                for n in root {
-                    self.note_row(ui, n);
-                }
-            }
-            for (folder, items) in groups.iter().filter(|(k, _)| !k.is_empty()) {
-                egui::CollapsingHeader::new(format!("▸ {folder}"))
-                    .default_open(true)
-                    .id_salt(folder)
-                    .show(ui, |ui| {
-                        for n in items {
-                            self.note_row(ui, n);
-                        }
-                    });
-            }
+            self.render_node(ui, &root, "", 0);
         });
     }
 
-    fn note_row(&mut self, ui: &mut egui::Ui, n: &Note) {
+    /// Render one node of the folder tree. `depth` is the nesting level (0 at
+    /// the workspace root); siblings inside a folder get `├─`/`└─` connectors
+    /// so files and folders read as a classic ASCII tree.
+    fn render_node(&mut self, ui: &mut egui::Ui, node: &FolderNode, path: &str, depth: usize) {
+        let total = node.notes.len() + node.children.len();
+        let mut idx = 0;
+
+        for n in &node.notes {
+            let is_last = idx + 1 == total;
+            let prefix = tree_prefix(depth, is_last);
+            self.note_row(ui, n, &prefix);
+            idx += 1;
+        }
+        for (name, child) in &node.children {
+            let is_last = idx + 1 == total;
+            let full = if path.is_empty() {
+                name.clone()
+            } else {
+                format!("{path}/{name}")
+            };
+            let connector = tree_prefix(depth, is_last);
+            let header = format!("{connector}{}/", name.to_uppercase());
+            egui::CollapsingHeader::new(egui::RichText::new(header).strong())
+                .default_open(true)
+                .id_salt(&full)
+                .show(ui, |ui| {
+                    self.render_node(ui, child, &full, depth + 1);
+                });
+            idx += 1;
+        }
+    }
+
+    fn note_row(&mut self, ui: &mut egui::Ui, n: &Note, prefix: &str) {
         let sel = Some(&n.id) == self.selected.as_ref();
         let label = if n.title.trim().is_empty() {
             "untitled".to_string()
         } else {
             n.title.clone()
         };
-        if ui.selectable_label(sel, format!("» {label}")).clicked() {
+        if ui.selectable_label(sel, format!("{prefix}» {label}")).clicked() {
             self.flush();
             self.nav_to(n);
             self.show_settings = false;
@@ -831,6 +851,40 @@ impl StarDeck {
     }
 }
 
+/// ASCII tree connector for a child row. Returns empty at the workspace root
+/// (depth 0), `└─ ` for the last sibling of a folder, `├─ ` otherwise.
+fn tree_prefix(depth: usize, is_last: bool) -> String {
+    if depth == 0 {
+        String::new()
+    } else if is_last {
+        "└─ ".to_string()
+    } else {
+        "├─ ".to_string()
+    }
+}
+
+/// A node in the folder tree built from the flat slash-delimited folder paths.
+/// `notes` are the notes that live directly in this folder; `children` are
+/// sub-folders keyed by their final path segment.
+#[derive(Default)]
+struct FolderNode {
+    notes: Vec<Note>,
+    children: BTreeMap<String, FolderNode>,
+}
+
+impl FolderNode {
+    fn insert(&mut self, segments: &[&str], note: Note) {
+        match segments.split_first() {
+            None => self.notes.push(note),
+            Some((head, tail)) => self
+                .children
+                .entry((*head).to_string())
+                .or_default()
+                .insert(tail, note),
+        }
+    }
+}
+
 enum ListEdit {
     /// Prefix to insert on the new line to continue the list.
     Continue(String),
@@ -1093,20 +1147,36 @@ impl eframe::App for StarDeck {
                 let tags = self.all_tags();
                 if !tags.is_empty() {
                     ui.add_space(2.0);
-                    ui.horizontal_wrapped(|ui| {
-                        if ui
-                            .selectable_label(self.active_tag.is_none(), "#all")
-                            .clicked()
-                        {
-                            self.active_tag = None;
-                        }
-                        for t in tags {
-                            let on = self.active_tag.as_deref() == Some(t.as_str());
-                            if ui.selectable_label(on, format!("#{t}")).clicked() {
-                                self.active_tag = if on { None } else { Some(t) };
-                            }
-                        }
-                    });
+                    let header = match &self.active_tag {
+                        Some(t) => format!("▸ TAGS · filtered #{t}"),
+                        None => format!("▸ TAGS ({})", tags.len()),
+                    };
+                    egui::CollapsingHeader::new(header)
+                        .default_open(false)
+                        .id_salt("tags-panel")
+                        .show(ui, |ui| {
+                            egui::ScrollArea::vertical()
+                                .max_height(140.0)
+                                .show(ui, |ui| {
+                                    ui.horizontal_wrapped(|ui| {
+                                        if ui
+                                            .selectable_label(self.active_tag.is_none(), "#all")
+                                            .clicked()
+                                        {
+                                            self.active_tag = None;
+                                        }
+                                        for t in tags {
+                                            let on = self.active_tag.as_deref() == Some(t.as_str());
+                                            if ui
+                                                .selectable_label(on, format!("#{t}"))
+                                                .clicked()
+                                            {
+                                                self.active_tag = if on { None } else { Some(t) };
+                                            }
+                                        }
+                                    });
+                                });
+                        });
                 }
                 ui.separator();
                 self.tree_panel(ui);

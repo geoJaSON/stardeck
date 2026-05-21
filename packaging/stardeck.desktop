@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Stardeck
+GenericName=Markdown Notes
+Comment=Offline-first, terminal-themed markdown note taker
+Exec=stardeck
+Icon=stardeck
+Terminal=false
+Categories=Utility;Office;TextEditor;
+Keywords=notes;markdown;journal;todo;
+StartupWMClass=STARDECK

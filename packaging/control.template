@@ -1,0 +1,12 @@
+Package: stardeck
+Version: __VERSION__
+Section: utils
+Priority: optional
+Architecture: __ARCH__
+Installed-Size: __SIZE__
+Maintainer: Jason Jordan <jasjordan@proton.me>
+Depends: libc6, libgcc-s1, libgl1, libx11-6, libxkbcommon0, libwayland-client0, libfontconfig1
+Description: Terminal-themed markdown note taker
+ Offline-first, terminal-themed markdown note taker. Notes live as
+ plain .md files in a folder you control, ready to be synced by any
+ tool (Syncthing, Dropbox, git, etc).
